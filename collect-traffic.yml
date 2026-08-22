@@ -1,0 +1,75 @@
+name: Collect HCMC traffic data
+
+on:
+  schedule:
+    # Every 10 minutes, offset from the top of the hour to reduce scheduling delay.
+    - cron: "3,13,23,33,43,53 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: traffic-data-collection
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Collect one traffic snapshot
+        id: crawler
+        shell: bash
+        env:
+          TOMTOM_API_KEY: ${{ secrets.TOMTOM_API_KEY }}
+        run: |
+          set +e
+          python traffic_congestion_crawler.py \
+            --samples 1 \
+            --output data/traffic_congestion.csv
+          crawler_exit_code=$?
+          set -e
+
+          if [ "$crawler_exit_code" -eq 2 ]; then
+            echo "Crawler configuration failed; CSV was not committed."
+            exit 2
+          fi
+
+          echo "exit_code=$crawler_exit_code" >> "$GITHUB_OUTPUT"
+
+      - name: Commit collected rows
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- data/traffic_congestion.csv
+
+          if git diff --cached --quiet; then
+            echo "No CSV changes to commit."
+            exit 0
+          fi
+
+          git commit -m "data: collect traffic snapshot"
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
+
+      - name: Report provider errors
+        if: steps.crawler.outputs.exit_code != '0'
+        shell: bash
+        run: |
+          echo "The snapshot was saved, but at least one location returned an error."
+          echo "Open data/traffic_congestion.csv and inspect error_type/error_message."
+          exit 1
+
